@@ -1,0 +1,9 @@
+{
+  "name": "InvestmentBot",
+  "description": "A bot that provides investment advice and market info, with scheduling capabilities.",
+  "allowed_numbers": [
+    "xxxxxxxxxxxx",
+    "xxxxxxxxxxxx",
+    "919976543210"
+  ]
+}
