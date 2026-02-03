@@ -1,0 +1,13 @@
+name: "InvestmentBot"
+description: "AI-powered investment assistant for stock analysis and portfolio management"
+model: "gemini-3-flash-preview"
+instruction_file: "app/instructions.md"
+tools:
+  - app.tools:get_yahoo_finance_data
+  - app.tools:get_multi_tickers_data
+  - app.tools:search_finance_news
+  - app.tools:get_sector_analysis
+  - app.tools:screen_market_by_valuation
+  - app.tools:schedule_investment_reminder
+  - app.tools:cancel_investment_reminders
+  - app.tools:list_investment_schedules

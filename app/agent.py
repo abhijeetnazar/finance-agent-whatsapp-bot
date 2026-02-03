@@ -51,6 +51,9 @@ def create_agent():
     )
     return agent
 
+# Create root_agent at module level for ADK web UI
+root_agent = create_agent()
+
 if __name__ == "__main__":
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
