@@ -11,23 +11,12 @@ from app.tools import (
     cancel_investment_reminders,
     list_investment_schedules
 )
+from app.config import AGENT_CONFIG
 
 # --- Agent Core ---
 
 def load_config():
-    """Loads agent configuration from JSON and Markdown files."""
-    base_dir = os.path.dirname(__file__)
-    config_path = os.path.join(base_dir, "agent_config.json")
-    instr_path = os.path.join(base_dir, "instructions.md")
-    
-    with open(config_path, "r") as f:
-        config = json.load(f)
-    
-    if os.path.exists(instr_path):
-        with open(instr_path, "r") as f:
-            config["instructions"] = f.read()
-            
-    return config
+    return AGENT_CONFIG
 
 def create_agent():
     """Creates and configures the investment agent."""

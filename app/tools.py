@@ -3,12 +3,47 @@ import redis
 import json
 import yfinance as yf
 from dotenv import load_dotenv
+from functools import lru_cache, wraps
+from app.config import logger
+import hashlib
 
 load_dotenv()
 
 # Initialize Redis client (centralized)
 redis_client = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
 
+def redis_cache(ttl_seconds: int = 300):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                # Create a unique cache key based on function name and arguments
+                key_parts = [func.__name__] + list(map(str, args)) + [f"{k}={v}" for k, v in kwargs.items()]
+                key_str = ":".join(key_parts)
+                hashed_key = hashlib.md5(key_str.encode()).hexdigest()
+                cache_key = f"cache:{hashed_key}"
+                
+                # Try to get from Redis
+                cached = redis_client.get(cache_key)
+                if cached:
+                    logger.info(f"Cache hit for {func.__name__}")
+                    return cached.decode('utf-8')
+                
+                # Call function
+                result = func(*args, **kwargs)
+                
+                # Save to Redis
+                if result and not result.startswith("Error"):
+                     redis_client.setex(cache_key, ttl_seconds, result)
+                
+                return result
+            except Exception as e:
+                logger.error(f"Cache error: {e}")
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+@redis_cache(ttl_seconds=60)
 def get_yahoo_finance_data(symbol: str) -> str:
     """
     Fetches real-time stock data, company information, and key statistics for a single ticker.
@@ -16,6 +51,7 @@ def get_yahoo_finance_data(symbol: str) -> str:
         symbol: The stock ticker symbol (e.g., 'AAPL', 'NVDA').
     """
     try:
+        logger.info(f"Fetching data for {symbol}")
         ticker = yf.Ticker(symbol)
         info = ticker.info
         
@@ -36,8 +72,10 @@ def get_yahoo_finance_data(symbol: str) -> str:
         )
         return data_str
     except Exception as e:
+        logger.error(f"Error fetching data for {symbol}: {e}")
         return f"Error fetching data for {symbol}: {str(e)}"
 
+@redis_cache(ttl_seconds=300)
 def get_multi_tickers_data(symbols_string: str) -> str:
     """
     Fetches current prices for multiple stock symbols at once.
@@ -45,6 +83,7 @@ def get_multi_tickers_data(symbols_string: str) -> str:
         symbols_string: Space-separated tickers (e.g., 'AAPL MSFT GOOG').
     """
     try:
+        logger.info(f"Fetching multi-ticker data for {symbols_string}")
         tickers = yf.Tickers(symbols_string)
         results = f"--- Multi-Ticker Snapshot ({symbols_string}) ---\n"
         for sym in symbols_string.split():
@@ -53,6 +92,7 @@ def get_multi_tickers_data(symbols_string: str) -> str:
             results += f"🔹 {sym}: {current_price} {info.get('currency', 'USD')}\n"
         return results
     except Exception as e:
+        logger.error(f"Error fetching multi-ticker data: {e}")
         return f"Error fetching multi-ticker data: {str(e)}"
 
 def search_finance_news(query: str) -> str:
@@ -62,6 +102,7 @@ def search_finance_news(query: str) -> str:
         query: Search term (e.g., 'AI stocks', 'Nvidia news').
     """
     try:
+        logger.info(f"Searching news for {query}")
         search = yf.Search(query, max_results=5)
         news = search.news
         if not news:
@@ -75,8 +116,10 @@ def search_finance_news(query: str) -> str:
             news_str += f"📰 {title} ({publisher})\n🔗 {link}\n\n"
         return news_str
     except Exception as e:
+        logger.error(f"Error searching news for {query}: {e}")
         return f"Error searching news for {query}: {str(e)}"
 
+@redis_cache(ttl_seconds=3600)
 def get_sector_analysis(sector_name: str) -> str:
     """
     Gets information and top companies for a market sector.
@@ -84,6 +127,7 @@ def get_sector_analysis(sector_name: str) -> str:
         sector_name: e.g., 'technology', 'healthcare', 'financial-services', 'energy'.
     """
     try:
+        logger.info(f"Analyzing sector: {sector_name}")
         # Normalize sector name for yfinance
         formatted_name = sector_name.lower().strip().replace(" ", "-")
         
@@ -110,9 +154,10 @@ def get_sector_analysis(sector_name: str) -> str:
             
         return analysis
     except Exception as e:
-        print(f"DEBUG: Sector Error: {str(e)}")
+        logger.error(f"Sector Error: {e}")
         return f"Error fetching sector info for '{sector_name}': {str(e)}. Try a major industry name."
 
+@redis_cache(ttl_seconds=600)
 def screen_market_by_valuation(criteria: str = "undervalued_growth") -> str:
     """
     Uses the yfinance Screener to find stocks matching a specific strategy.
@@ -120,6 +165,7 @@ def screen_market_by_valuation(criteria: str = "undervalued_growth") -> str:
         criteria: One of 'undervalued_growth', 'day_gainers', 'day_losers', 'most_actives', 'growth_technology_stocks', 'most_shorted_stocks'.
     """
     try:
+        logger.info(f"Screening market by {criteria}")
         lookup = {
             "undervalued growth": "undervalued_growth_stocks",
             "growth stocks": "undervalued_growth_stocks",
@@ -194,6 +240,7 @@ def screen_market_by_valuation(criteria: str = "undervalued_growth") -> str:
         
         return resp
     except Exception as e:
+        logger.error(f"Error screening market: {e}")
         return f"Error screening market: {str(e)}."
 
 def schedule_investment_reminder(phone_number: str, interval: str, duration: str = "forever", topic: str = "general market") -> str:
@@ -240,6 +287,7 @@ def schedule_investment_reminder(phone_number: str, interval: str, duration: str
     
     redis_client.zadd("scheduled_tasks", {json.dumps(task_data): next_run})
     duration_msg = "just once" if is_one_time else (f"every {interval} for {duration}" if end_time > 0 else f"every {interval} forever")
+    logger.info(f"Scheduled reminder for {phone_number}: {topic} ({duration_msg})")
     return f"Scheduled {topic} update for {phone_number} {duration_msg}."
 
 def cancel_investment_reminders(phone_number: str, topic: str = None) -> str:
@@ -266,9 +314,11 @@ def cancel_investment_reminders(phone_number: str, topic: str = None) -> str:
         
         if removed_count == 0:
             return "No active reminders found for your number."
-            
+        
+        logger.info(f"Cancelled {removed_count} reminders for {phone_number}")    
         return f"Successfully stopped {removed_count} active reminder(s)."
     except Exception as e:
+        logger.error(f"Error cancelling reminders: {e}")
         return f"Error cancelling reminders: {str(e)}"
 
 def list_investment_schedules(phone_number: str) -> str:
@@ -311,4 +361,5 @@ def list_investment_schedules(phone_number: str) -> str:
         resp = "📋 **Your Active Schedules:**\n" + "\n".join(user_tasks)
         return resp
     except Exception as e:
+        logger.error(f"Error listing schedules: {e}")
         return f"Error listing schedules: {str(e)}"

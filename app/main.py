@@ -1,6 +1,6 @@
 import os
 import json
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from app.agent import create_agent
 from app.whatsapp import send_whatsapp_message
 from dotenv import load_dotenv
@@ -16,10 +16,7 @@ agent = create_agent()
 session_service = InMemorySessionService()
 runner = Runner(app_name="whatsapp-investment-bot", agent=agent, session_service=session_service)
 
-# Load allowed numbers from config
-with open("app/agent_config.json", "r") as f:
-    config_data = json.load(f)
-ALLOWED_NUMBERS = config_data.get("allowed_numbers", [])
+from app.config import ALLOWED_NUMBERS
 
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 
@@ -39,11 +36,11 @@ async def verify_webhook(request: Request):
     return "Invalid request"
 
 @app.post("/webhook")
-async def webhook_post(request: Request):
-    """Handle incoming WhatsApp messages."""
+async def webhook_post(request: Request, background_tasks: BackgroundTasks):
+    """Handle incoming WhatsApp messages asynchronously."""
     try:
         body = await request.json()
-        print(f"DEBUG: Webhook received body: {body}")
+        # print(f"DEBUG: Webhook received body: {body}")
         
         # Extract message data
         entry = body.get("entry", [])
@@ -63,76 +60,72 @@ async def webhook_post(request: Request):
             text_body = msg.get("text", {}).get("body")
             
             # Check if phone number is allowed
-            # Normalize by removing '+' if present
             clean_number = from_number.replace("+", "")
             if ALLOWED_NUMBERS and clean_number not in ALLOWED_NUMBERS:
-                print(f"WARNING: Unauthorized access attempt from {from_number}")
+                # logger.warning(f"Unauthorized access attempt from {from_number}")
                 return {"status": "unauthorized"}
             
             if text_body:
-                # Include context about the sender so the agent can use the phone number for scheduling
-                full_prompt = f"User (Phone: {from_number}): {text_body}"
+                # Offload processing to background task
+                background_tasks.add_task(process_message_background, from_number, text_body)
                 
-                # Create message content object
-                message = types.Content(
-                    role="user",
-                    parts=[types.Part(text=full_prompt)]
-                )
-                
-                # Create or get session for this user
-                # The session_service will handle whether the session exists or not
-                try:
-                    # Try to create a new session
-                    session = await session_service.create_session(
-                        app_name="whatsapp-investment-bot",
-                        user_id=from_number,
-                        session_id=from_number
-                    )
-                except Exception as e:
-                    # If session already exists, that's fine - we can still use it
-                    # The runner will use the existing session
-                    print(f"Session info: {str(e)}")
-                    pass
-                
-                # Get response from AI Agent using Runner
-                # Using from_number as both user_id and session_id for persistent conversations
-                print(f"DEBUG: About to call runner.run() for user {from_number}")
-                from starlette.concurrency import run_in_threadpool
-                try:
-                    # Run the blocking runner.run method in a separate thread
-                    result = await run_in_threadpool(
-                        runner.run, 
-                        user_id=from_number, 
-                        session_id=from_number, 
-                        new_message=message
-                    )
-                    print(f"DEBUG: runner.run() returned, processing events...")
-                except Exception as e:
-                    print(f"ERROR: runner.run() failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    result = []
-                
-                # Extract the text from the result
-                ai_text = ""
-                for event in result:
-                    # Handle different event structures
-                    if hasattr(event, 'content') and event.content and hasattr(event.content, 'parts'):
-                        for part in event.content.parts:
-                            if hasattr(part, 'text') and part.text:
-                                ai_text += part.text
-                    elif hasattr(event, 'text') and event.text:
-                        ai_text += event.text
-                
-                # Send response back to WhatsApp
-                if ai_text:
-                    await send_whatsapp_message(from_number, ai_text)
-        
         return {"status": "ok"}
     
     except Exception as e:
-        print(f"Error processing webhook: {e}")
+        # logger.error(f"Error processing webhook: {e}")
         return {"status": "error", "message": str(e)}
+
+async def process_message_background(from_number: str, text_body: str):
+    """
+    Background task to process the message with the AI agent.
+    This runs after the webhook returns 200 OK.
+    """
+    try:
+        full_prompt = f"User (Phone: {from_number}): {text_body}"
+        
+        # Create message content object
+        message = types.Content(
+            role="user",
+            parts=[types.Part(text=full_prompt)]
+        )
+        
+        # Create or get session
+        try:
+            session = await session_service.create_session(
+                app_name="whatsapp-investment-bot",
+                user_id=from_number,
+                session_id=from_number
+            )
+        except Exception:
+            # Session likely exists
+            pass
+        
+        # Run agent in threadpool to avoid blocking async loop
+        from starlette.concurrency import run_in_threadpool
+        
+        result = await run_in_threadpool(
+            runner.run, 
+            user_id=from_number, 
+            session_id=from_number, 
+            new_message=message
+        )
+        
+        # Extract response text
+        ai_text = ""
+        for event in result:
+            if hasattr(event, 'content') and event.content and hasattr(event.content, 'parts'):
+                for part in event.content.parts:
+                    if hasattr(part, 'text') and part.text:
+                        ai_text += part.text
+            elif hasattr(event, 'text') and event.text:
+                ai_text += event.text
+        
+        # Send response via WhatsApp API
+        if ai_text:
+            await send_whatsapp_message(from_number, ai_text)
+            
+    except Exception as e:
+        print(f"Error in background task: {e}") # Replace with logger later if needed
 
 @app.get("/")
 def read_root():
